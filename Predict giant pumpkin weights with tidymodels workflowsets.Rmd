@@ -1,0 +1,287 @@
+---
+title: "Predicting Pumpkin"
+author: "Boniface Kalong"
+date: "10/31/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#theme_set(theme_bw())
+```
+
+## Predict #TidyTuesday giant pumpkin weights with workflowsets
+
+Demonstrating how to use the tidymodels packages. If you are a
+tidymodels user, either just starting out or someone who has used the packages a lot, we are interested in your
+feedback on our priorities for 2022. The survey we fielded last year turned out to be very helpful in making decisions,
+so we would so appreciate your input again!
+Today’s screencast is great for someone just starting out with workflowsets, the tidymodels package for handling
+multiple preprocessing/modeling combinations at once, with this week’s #TidyTuesday dataset on giant pumpkins from
+competitons. �
+
+Today’s screencast is great for someone just starting out with workflowsets, the tidymodels package for handling
+multiple preprocessing/modeling combinations at once, with this week’s #TidyTuesday dataset on giant pumpkins from
+competitons
+
+```{r cars}
+# Import Data
+Pumpkins <- read.csv("pumpkins.csv")
+head(Pumpkins)
+#view(Pumpkins)
+```
+
+## Load Libiraries That we going to Experencies
+```{r}
+
+library(tidyverse)
+library(ggplot2)
+```
+
+
+
+```{r pressure, echo=FALSE}
+Pumpkins_S <- Pumpkins %>%
+  separate(id, into = c("year","type"))%>%
+  filter(type == "P")%>%
+  mutate(across(c(year, weight_lbs, ott, place), parse_number)) %>%
+  select(weight_lbs, year,type, place, ott, gpc_site, country)
+head(Pumpkins_S)
+```
+
+The main relationship here is between the volume/size of the pumpkin (measured via “over-the-top inches”) and
+weight.
+```{r}
+
+  skimr::skim(Pumpkins_S)
+
+
+
+```
+
+```{r}
+visdat::vis_dat(Pumpkins_S)
+```
+
+```{r}
+Pumpkins_S%>%
+  filter(ott > 0.1, ott < 1e3)%>%
+  ggplot(aes(ott, weight_lbs, color = place)) +
+  geom_point(alpha = 0.1, size = 1.1) +
+  labs(x ="over-the-top inches", y ="weight (lbs)")
+     
+
+```
+Big, heavy pumpkins placed closer to winning at the competitions, naturally!
+
+```{r}
+#Has there been any shift in this relationship over time?
+Pumpkins_S%>%
+  filter(ott > 20, ott < 1e3)%>%
+   ggplot(aes(ott, weight_lbs)) +
+  geom_point(alpha = 1, size = 1.4,  color = "gray60") +
+  geom_smooth(aes(color = factor(year)),
+              method =  lm,
+              formula = y ~ splines::bs(x,3),
+              se = FALSE, size = 1.5, alpha = 0.6) +
+  labs(x ="over-the-top inches", y ="weight (lbs)") +
+  scale_color_viridis_d()
+
+```
+ 
+```{r}
+#Which countries produced more or less massive pumpkins?
+Pumpkins_S %>%
+  mutate(country = fct_lump(country, n = 10),
+  country = fct_reorder(country, weight_lbs)) %>%
+  ggplot(aes(country, weight_lbs, color = country)) +
+  geom_boxplot() +
+  geom_jitter(alpha = 0.1, width = 0.15) +
+  labs(x = "Countries", y = "weight (lbs)") +
+  theme(legend.position ="none")
+
+```
+## Treat Outlier
+
+```{r}
+#Which countries produced more or less massive pumpkins?
+Pumpkins_S %>%
+  mutate(country = fct_lump(country, n = 10),
+  country = fct_reorder(country, weight_lbs)) %>%
+  ggplot(aes(country, weight_lbs, color = country)) +
+  geom_boxplot(outlier.colour = NA) +
+  geom_jitter(alpha = 0.1, width = 0.15) +
+  labs(x = "Countries", y = "weight (lbs)") +
+  theme(legend.position ="none")
+
+```
+
+## Build and fit a workflow set
+Let’s start our modeling by setting up our “data budget.” We’ll stratify by our outcome weight_lbs.
+```{r}
+library(tidymodels)
+set.seed(2021)
+Pumpkins_Set<-
+  Pumpkins_S%>%
+  initial_split(strata = weight_lbs)
+
+Pumpkins_train =training(Pumpkins_Set)
+Pumpkins_test = testing(Pumpkins_Set)
+
+
+set.seed(2022)
+Pumpkins_folds <- vfold_cv(Pumpkins_train,strata = weight_lbs)
+Pumpkins_folds
+
+
+```
+
+##Next
+let’s create three data preprocessing recipes: one that only pools infrequently used factors levels, one that also
+creates indicator variables, and finally one that also creates spline terms for over-the-top inches.
+
+```{r}
+Base_Recipe <- recipe( weight_lbs~ott +country+year+ gpc_site, data = Pumpkins_train)%>%
+  step_other(country, gpc_site, threshold = 0.02)
+
+Indicator_Recipe <- Base_Recipe %>%
+  step_dummy(all_nominal_predictors())
+
+SplineTerm_Recipe <- Indicator_Recipe %>%
+  step_bs(ott)
+```
+
+## Models
+Then, let’s create three model specifications: 
+ - Random forest model
+ - MARS model(Multivariate adaptive regression splines (MARS))
+ - Linear model
+
+```{r}
+library(parsnip)
+# Random forest model
+Random_forest_model <- 
+  rand_forest(trees = 1e3)%>%
+  set_mode("regression")%>% #or classification
+  set_engine("ranger") #or glmnet 
+  
+# Linear regression
+Linear_regression <- linear_reg(
+  mode = "regression", 
+  engine = "lm", 
+  penalty = NULL, 
+  mixture = NULL
+  )
+
+# Multivariate adaptive regression splines (MARS)
+MARS_model <- mars(
+  mode = "regression",#or classification
+  engine = "earth",
+  num_terms = NULL,
+  prod_degree = NULL,
+  prune_method = NULL
+)
+
+```
+
+## Workflow
+Now it’s time to put the preprocessing and models together in a workflow_set().
+
+```{r}
+Pumpkin_set_F <-
+workflow_set(
+list(Base_Recipe, Indicator_Recipe, SplineTerm_Recipe),
+list(Random_forest_model, MARS_model, Linear_regression),
+cross = FALSE #or TURE
+)
+Pumpkin_set_F
+```
+
+## Note
+We use cross = FALSE because we don’t want every combination of these components, only three options to try. 
+
+ ## What about if we use cross = TRUE
+```{r}
+Pumpkin_set_T <-
+workflow_set(
+list(Base_Recipe, Indicator_Recipe, SplineTerm_Recipe),
+list(Random_forest_model, MARS_model, Linear_regression),
+cross = TRUE
+)
+Pumpkin_set_T
+```
+ 
+Let’s fit these possible candidates to our resamples to see which one performs best.when cross = FALSE
+# Allowable values are: 'tune_grid', 'tune_bayes', 'fit_resamples', 'tune_race_anova', 'tune_race_win_loss', 'tune_sim_anneal'
+
+```{r}
+doParallel::registerDoParallel()
+set.seed(2021)
+Pumpkins_Resamples <-
+  workflow_map(
+    Pumpkin_set_F, # when cross = FALSE  
+    "tune_race_win_loss",
+    resample = Pumpkins_folds
+    
+  )
+Pumpkins_Resamples
+```
+
+Let’s fit these possible candidates to our resamples to see which one performs best.when cross = TRUE
+```{r}
+doParallel::registerDoParallel()
+set.seed(2021)
+Pumpkins_Resamples2 <-
+  workflow_map(
+    Pumpkin_set_T, # when cross = TRUE  
+    "fit_resamples",
+    resample = Pumpkins_folds
+    
+  )
+Pumpkins_Resamples2
+```
+
+
+## Evaluate workflow set
+How did our three candidates do?
+
+
+```{r}
+autoplot(Pumpkins_Resamples)
+workflowsets:::autoplot.workflow_set(Pumpkins_Resamples)
+workflowsets:::pick_metric(object, rank_metric, metric)
+workflowsets:::collect_metrics.workflow_set(x)
+```
+There is not much difference between the three options, and if anything, our linear model with spline feature
+engineering maybe did better. This is nice because it’s a simpler model!
+
+```{r}
+
+
+
+collect_metrics(Pumpkins_Resamples)
+```
+
+We can extract the workflow we want to use and fit it to our training data.
+```{r}
+Final_Fit <-
+extract_workflow(Pumpkins_Resamples,
+"recipe_3_linear_reg") %>%
+fit(pumpkin_train)
+
+```
+
+We can use an object like this to predict, such as on the test data like predict(final_fit, pumpkin_test), or we can
+examine the model parameters.
+```{r}
+
+tidy(Final_Fit) %>%
+arrange(-abs(estimate))
+
+predict(Final_Fit, pumpkin_test)
+```
+The spline terms are by far the most important, but we do see evidence of certain sites and countries being predictive
+of weight (either up or down) as well as a small trend of heavier pumpkins with year.
+
